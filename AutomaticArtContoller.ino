@@ -7,10 +7,10 @@
  * followed by the steps(1 byte each)
  * 
  * The solenoid is driven by PORTC0 which is pin A0(14) on Arduino.
- * The photo interruptor uses INT0 on pin 2.
- * The motor switch is on pin 5
+ * The photo interruptor is on pin 2.
+ * The motor switch is on pin 5 with pwm
  * The oh-crap-the-thread-ran-out signal is on pin 6
- * 
+ * Button is on pin 7
  * 
  * This code is in the public domain
  */
@@ -18,11 +18,11 @@
 #include <SD.h>
 
 // set these parameters for your image
-#define PINCOUNT 207
+uint8_t pinCount;
 #define fileName "s.art"
 
 // step data buffer size
-#define BSIZE 64
+#define BSIZE 128
 
 // some convenient commands
 #define ledOn PORTC |= 0b00000001
@@ -31,30 +31,24 @@
 #define solenoidOff PORTC &= 0b11111101
 #define MOTORPIN 5
 #define OCTTROPIN 6
+#define BUTTONPIN 7
 
-volatile byte pos;
-volatile byte nextPin;
-volatile bool pinDone;
+byte pos;
+byte nextPin;
+bool pinDone, onPin;
+unsigned long toc;
+unsigned long tic;
+byte checkPos;
+bool checkReady, checking;
 
 unsigned int step, totalSteps;
 byte stepBuffer[2][BSIZE];
 byte nextBuffer, currentBuffer, bufferIndex;
 bool readyToFill;
 File sFile;
+int motorSpeed;
+bool finished;
 
-ISR(INT0_vect){
-  // increment pos and if necessary switch on solenoid
-  pos++;
-  if(pos == PINCOUNT){
-    pos = 0;
-  }
-  if(pos == nextPin){
-    solenoidOn;
-    pinDone = true;
-  }else{
-    solenoidOff;
-  }
-}
 
 void setup() {
   //
@@ -62,11 +56,17 @@ void setup() {
   pinMode(15, OUTPUT); // solenoid
   pinMode(MOTORPIN, OUTPUT); // motor
   pinMode(OCTTROPIN, INPUT_PULLUP); // oh-crap-the-thread-ran-out
+  pinMode(BUTTONPIN, INPUT_PULLUP); // button
   pinMode(2, INPUT); // position sensor
   
   
   pos = 0;
   pinDone = false;
+  onPin = false;
+  finished = false;
+  checkPos = 0;
+  checkReady = false;
+  checking = false;
 
   // open the file on the SD card
   if (!SD.begin(4)){
@@ -85,6 +85,9 @@ void setup() {
   // read the number of steps (2 bytes)
   totalSteps = sFile.read();
   totalSteps = (totalSteps << 8) + sFile.read();
+
+  // read the number of pins
+  pinCount = sFile.read();
   
   // fill the first buffer
   nextBuffer = 0;
@@ -111,40 +114,130 @@ void setup() {
   bufferIndex = 1;
   nextPin = stepBuffer[currentBuffer][bufferIndex];
   bufferIndex = 2;
-  
-  EICRA = (1<<ISC00)|(1<<ISC01); // rising on pin 2 triggers interrupt
-  EIMSK = (1<<INT0);
-  sei();
 
+  // wait for the button to be pressed and released to start
+  while(digitalRead(BUTTONPIN));
+  // debounce and wait for release
+  delay(50);
+  while(!digitalRead(BUTTONPIN));
+  delay(50);
+  
   // turn on the motor and here we go
-  digitalWrite(MOTORPIN, HIGH);
+  motorSpeed = 160;
+  analogWrite(MOTORPIN, motorSpeed);
+  tic = millis();
+  toc = tic;
 }
 
 void loop() {
+  // check the position encoder
+  if(PIND&4){
+    if(!onPin){
+      // ignore signals that are less than a reasonable time apart
+      if(millis()-toc > 10){
+        onPin = true;
+        pos++;
+        if(pos == pinCount){
+          pos = 0;
+        }
+        if(pos == nextPin){
+          solenoidOn;
+          pinDone = true;
+        }else{
+          solenoidOff;
+        }
+        toc = millis();
+      }
+      
+    }
+    
+  }else{
+    onPin = false;
+  }
+  
   // check for various conditions and take the corresponding actions
+  // If the solenoid has been triggered, load the next pin.
   if(pinDone){
     step++;
     if(step > totalSteps){
       // the steps are done
-      // turn stop and turn on the LED
-      EIMSK = 0;
-      digitalWrite(MOTORPIN, LOW);
-      solenoidOff;
-      ledOn;
-      while(true);
+      // let it wrap around the last pin before stopping
+      finished = true;
+      toc = tic;
     }
     nextPin = getNextPin();
     pinDone = false;
   }
-  
-  if(readyToFill){
-    fillNextBuffer();
+
+  // When fniished, wait for the next pin to pass, then shut down
+  if(finished && (toc > tic)){
+    // stop and turn on the LED
+    analogWrite(MOTORPIN, 0);
+    digitalWrite(MOTORPIN, LOW);
+    solenoidOff;
+    ledOn;
+    sFile.close();
+    
+    while(true);
   }
 
-  if(!digitalRead(OCTTROPIN)){
-    // thread ran out. Just stop
-    errorStop(5);
+  if(digitalRead(OCTTROPIN)){
+    // not the OCTTRO sensor
+    // makes sure the pos is not getting too far off
+    if(!checking){
+      checking = true;
+      if(checkReady){
+        if(pos == checkPos){
+          // we're good to go
+          ledOff;
+        }else{
+          // it got off somewhere
+          // brutally smack the thing back into place
+          pos = checkPos;
+          ledOn;
+        }
+      }else{
+        checkReady = true;
+        checkPos = pos;
+      }
+    }
+  }else{
+    // reset checking
+    checking = false;
   }
+
+  if(!digitalRead(BUTTONPIN)){
+    // nothing here yet
+  }
+
+  // check speed and adjust motor speed accordingly
+  if(toc > tic){
+    if(toc-tic > 40){
+      // speed up
+      motorSpeed ++;
+      if(motorSpeed > 255){
+        motorSpeed = 255;
+      }
+    }else if(toc-tic < 30){
+      // slow down
+      motorSpeed --;
+      if(motorSpeed < 100){
+        motorSpeed = 100;
+      }
+    }
+    analogWrite(MOTORPIN, motorSpeed);
+    tic = toc;
+  }else if(millis() - tic > 500){
+    // it's probably stalled, boost the power a chunk
+    motorSpeed += 20;
+    if(motorSpeed > 255){
+      motorSpeed = 255;
+    }
+    analogWrite(MOTORPIN, motorSpeed);
+    tic = millis();
+    toc = tic;
+  }
+  
 }
 
 byte getNextPin(){
@@ -155,8 +248,8 @@ byte getNextPin(){
     }else{
       currentBuffer = 0;
     }
-    readyToFill = true;
     bufferIndex = 0;
+    fillNextBuffer(); 
   }
   // return the next byte in the buffer
   bufferIndex++;
@@ -184,6 +277,7 @@ void fillNextBuffer(){
 void errorStop(int i){
   // just stop and flash the LED
   EIMSK = 0;
+  analogWrite(MOTORPIN, 0);
   digitalWrite(MOTORPIN, LOW);
   solenoidOff;
   while(true){

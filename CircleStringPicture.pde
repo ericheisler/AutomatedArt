@@ -11,6 +11,8 @@
   5. If you are ready, click the "compute" button.
   6. wait.
   7. Clicking the "display" button will show different things.
+  8. Clicking the save button will produce a file for use with the matching
+     Arduino sketch.
   
   NOTE: 
     A selected region with diameter of about 500 to 800 pixels works well.
@@ -23,47 +25,57 @@
 */
 
 // These parameters can only be set here
-int pinCount = 200;
-int stepCount = 3500;
+int pinCount = 193;
+int maxStepCount = 6000;
 
 // These can be set while running the sketch
-int fade = 30;
-int opacity = 40;
-int ignoreDist = 20;
+int fade = 50;
+int opacity = 160;
+int ignoreDist = 30;
+int stepCount = 2000; //must be less than maxStepCount
+int resolution = 400; // number of pixels in the diameter of the circle
 
-String fileName;
+String fileName, outputFileName, loadFileName;
 boolean fileSelectedRun;
 
 PImage pic, pic2;
-short[] steps = new short[stepCount];
+short[] steps = new short[maxStepCount];
 int[][] pinsXY = new int[pinCount][2];
 
 int[][][] paths; // this can get big. You may need to increase allowed memory size
 int[][] pathLengths;
 
 int circleX, circleY, circleRadius;
+int circleX2, circleY2, circleRadius2; // for the resized picture
 char circleCentered, circleSet, circlePinned, pinsShifted, stepsDone, withPic, pathsDone;
 
 float picScale, picScale2;
 int picX, picY;
 
+float totalLength;
 
 
 void setup(){
-  size(800, 700);
+  size(950, 850);
   picX = 80;
-  picY = 60;
+  picY = 80;
   
   // select the image file
   fileName = null;
   while(fileName == null){
     fileSelectedRun = false;
     selectInput("Select an image file", "fileSelected", new File(sketchPath("select an image file")));
-    while(!fileSelectedRun);
+    println("waiting");
+    while(!fileSelectedRun){
+      delay(500);
+      print(".");
+    }
+    println("waiting2");
   }
-  
+  println("file selected");
   // load the picture
   pic = loadImage(fileName);
+  println("pic loaded");
   if(pic.width > pic.height){
     picScale = (width-picX)*1.0/pic.width;
     image(pic, picX, picY, width-picX, pic.height*picScale);
@@ -80,6 +92,7 @@ void setup(){
   stepsDone = 0;
   withPic = 0;
   pathsDone = 0;
+  totalLength = 0;
   ellipseMode(RADIUS);
 }
 
@@ -102,6 +115,12 @@ void draw(){
   // this button displays the picture in the background
   rect(0, picY+90, picX, 30);
   
+  // this button saves the data file
+  rect(0, picY+120, picX, 30);
+  
+  // this button reads a data file
+  rect(0, picY+150, picX, 30);
+  
   // this is the transparency of the lines
   rect(100 + opacity*(width-100-20)/255, 0, 20, 20);
   
@@ -112,6 +131,10 @@ void draw(){
   // this is the ignore distance
   rect(100 + ignoreDist*(width-100-20)/(pinCount/2), 40, 20, 20);
   line(0, 40, width, 40);
+  
+  // this is the line count
+  rect(100 + (stepCount*(width-100-20))/maxStepCount, 60, 20, 20);
+  line(0, 60, width, 60);
   line(100, 0, 100, picY);
   
   // labels
@@ -121,12 +144,22 @@ void draw(){
   text("set circle", 5, picY+50);
   text("compute", 5, picY+80);
   text("display", 5, picY+110);
+  text("save data", 5, picY+140);
+  text("load data", 5, picY+170);
   text("darkness", 5, 18);
   text(opacity, 70, 18);
   text("fade ", 5, 38);
   text(fade, 70, 38);
   text("min dist.", 5, 58);
   text(ignoreDist, 70, 58);
+  text("lines", 5, 78);
+  text(stepCount, 70, 78);
+  
+  text("length", 5, picY + 200);
+  text(totalLength, 5, picY + 220);
+  text("(x diameter)", 5, picY + 240);
+  text("resolution", 5, picY + 260);
+  text(resolution, 5, picY + 280);
   
   if(stepsDone > 0){
     stroke(0, opacity);
@@ -186,10 +219,12 @@ void draw(){
 }
 
 void fileSelected(File f){
+  println("fs");
   if(f != null){
     fileName = f.getName();
   }
   fileSelectedRun = true;
+  println("fs2");
 }
 
 void mousePressed(){
@@ -226,6 +261,10 @@ void mousePressed(){
       if(withPic > 2){
         withPic = 0;
       }
+    }else if(mouseY < picY + 150){
+      saveFile();
+    }else if(mouseY < picY + 180){
+      loadFile();
     }
   }else if(mouseX < 100){
     // this is the label area
@@ -238,13 +277,23 @@ void mousePressed(){
       computeSteps();
     }
     
-  }else if(mouseY < picY){
+  }else if(mouseY < 60){
     ignoreDist = (mouseX-100)*(pinCount/2)/(width-100-20);
     // have to recompute
     if(stepsDone > 0){
       computeSteps();
     }
     
+  }else if(mouseY < picY){
+    int tmpstepCount = ((mouseX-100)*maxStepCount)/(width-100-20);
+    if(tmpstepCount > stepCount){
+      // recomupte
+      // yes, I know this is unnecessary, but I'm lazy
+      if(stepsDone > 0){
+        computeSteps();
+      }
+    }
+    stepCount = tmpstepCount;
   }else if(circleCentered < 1){
     // set the circle center
     circleX = round((mouseX - picX)*1.0/picScale);
@@ -286,8 +335,7 @@ void pinCircle(){
   updatePixels();
   
   // compute the pin locations
-  // angle between each is 1.40625 degrees
-  // 0.0245436926 radians
+  // angle between each is ...
   // start at the right and follow standard orientation
   float angle = PI*2.0/pinCount;
   for(int i=0; i<pinCount; i++){
@@ -296,21 +344,49 @@ void pinCircle(){
   }
 }
 
+void keyPressed(){
+  if(keyCode == UP){
+    if(resolution < 1000){
+      resolution += 50;
+      
+      pinCircle();
+      pinsShifted = 0;
+      pathsDone = 0;
+      computeSteps();
+    }
+  }else if(keyCode == DOWN){
+    if(resolution > 50){
+      resolution -= 50;
+      
+      pinCircle();
+      pinsShifted = 0;
+      pathsDone = 0;
+      computeSteps();
+    }
+  }
+}
+
 void computeSteps(){
   // work with a copy of the pic
   pic2 = createImage(circleRadius*2+2, circleRadius*2+2, RGB);
   pic2.copy(pic, round(circleX - circleRadius), round(circleY - circleRadius), circleRadius*2+2, circleRadius*2+2, 0, 0, circleRadius*2+2, circleRadius*2+2);
   pic2.filter(INVERT);
+  pic2.resize(resolution, resolution);
   pic2.loadPixels();
-  picScale2 = (height-picY)*1.0/(circleRadius*2+2);
+  println(pic2.pixels.length);
+  picScale2 = (height-picY)*1.0/(resolution);
+  circleRadius2 = resolution/2;
+  circleX2 = circleRadius2;
+  circleY2 = circleX2;
   
   long[] sum = new long[pinCount];
   
   // shift all the pin locations
   if(pinsShifted < 1){
+    float angle = PI*2.0/pinCount;
     for(int i=0; i<pinCount; i++){
-      pinsXY[i][0] -= circleX - circleRadius;
-      pinsXY[i][1] -= circleY - circleRadius;
+      pinsXY[i][0] = round(circleX2 + (circleRadius2-1) * cos(i*angle));
+      pinsXY[i][1] = round(circleY2 - (circleRadius2-1) * sin(i*angle));
     }
     pinsShifted = 1;
   }
@@ -327,31 +403,18 @@ void computeSteps(){
   // then lighten the chosen path a little
   // start at pin 0
   steps[0] = 0;
+  totalLength = 0;
+  long maxSum;
+  short maxIndex;
+  boolean ignore;
   for(int i=1; i<stepCount; i++){
     // sum all the gray values over the line to each other pin
+    maxSum = 0;
+    maxIndex = 100;
+    ignore = false;
     for(int j=0; j<pinCount; j++){
       sum[j] = 0;
       int d = 0;
-      if(steps[i-1] > j){
-        for(int k=0; k<pathLengths[j][steps[i-1]-j-1]; k++){
-          sum[j] += pic2.pixels[paths[j][steps[i-1]-j-1][k]] & 0xFF;
-          d++;
-        }
-      }else if(steps[i-1] < j){
-        for(int k=0; k<pathLengths[steps[i-1]][j-steps[i-1]-1]; k++){
-          sum[j] += pic2.pixels[paths[steps[i-1]][j-steps[i-1]-1][k]] & 0xFF;
-          d++;
-        }
-      }
-      sum[j] = round(sum[j]*1.0/d);
-      // one sum done
-    }
-    
-    // find the pin with max sum
-    long maxSum = 0;
-    short maxIndex = 100;
-    boolean ignore = false;
-    for(short j=0; j<pinCount; j++){
       // ignore pins within some distance
       ignore = false;
       if(j < steps[i-1]){
@@ -369,13 +432,31 @@ void computeSteps(){
         ignore = true;
       }
       
+      // skip the ignored pins
       if((j != steps[i-1]) && (!ignore)){
+        if(steps[i-1] > j){
+          for(int k=0; k<pathLengths[j][steps[i-1]-j-1]; k++){
+            sum[j] += pic2.pixels[paths[j][steps[i-1]-j-1][k]] & 0xFF;
+            d++;
+          }
+        }else if(steps[i-1] < j){
+          for(int k=0; k<pathLengths[steps[i-1]][j-steps[i-1]-1]; k++){
+            sum[j] += pic2.pixels[paths[steps[i-1]][j-steps[i-1]-1][k]] & 0xFF;
+            d++;
+          }
+        }
+        sum[j] = round(sum[j]*1.0/d);
+        
         if(sum[j] > maxSum){
           maxSum = sum[j];
-          maxIndex = j;
+          maxIndex = (short)j;
         }
       }
+      
+      // one sum done
     }
+    
+    
     steps[i] = maxIndex;
     
     // now go back and lighten that line
@@ -383,10 +464,12 @@ void computeSteps(){
       for(int k=0; k<pathLengths[steps[i]][steps[i-1]-steps[i]-1]; k++){
         pic2.pixels[paths[steps[i]][steps[i-1]-steps[i]-1][k]] = lighten(pic2.pixels[paths[steps[i]][steps[i-1]-steps[i]-1][k]]);
       }
+      totalLength += pathLengths[steps[i]][steps[i-1]-steps[i]-1] * 1.0/(circleRadius2*2);
     }else if(steps[i-1] < steps[i]){
       for(int k=0; k<pathLengths[steps[i-1]][steps[i]-steps[i-1]-1]; k++){
         pic2.pixels[paths[steps[i-1]][steps[i]-steps[i-1]-1][k]] = lighten(pic2.pixels[paths[steps[i-1]][steps[i]-steps[i-1]-1][k]]);
       }
+      totalLength += pathLengths[steps[i-1]][steps[i]-steps[i-1]-1] * 1.0/(circleRadius2*2);
     }
     
     
@@ -491,4 +574,93 @@ color lighten(color c){
     b -= fade;
   }
   return color(b);
+}
+
+void saveFile(){
+  // The first two bytes are the number of steps (msB first)
+  // The next byte is the number of pins.
+  // Note that the maximum number of pins is 255 because steps
+  // are stored in single bytes.
+  byte[] data = new byte[3+stepCount];
+  data[0] = 0;
+  data[1] = 0;
+  data[2] = 0;
+  data[0] |= (stepCount>>8) & 0xFF;
+  data[1] |= stepCount & 0xFF;
+  data[2] |= pinCount & 0xFF;
+  for(int i=0; i<stepCount; i++){
+    data[i+3] = 0;
+    data[i+3] |= steps[i] & 0xFF;
+  }
+  fileSelectedRun = false;
+  selectOutput("Select a file to write to:", "outputFileSelected", new File(sketchPath("*.art")));
+  while(!fileSelectedRun){
+    delay(500);
+    print(".");
+  }
+  saveBytes(outputFileName, data);
+  
+}
+
+void outputFileSelected(File f){
+  if (f == null) {
+    outputFileName = sketchPath("s.art");
+  }else{
+    outputFileName = f.getAbsolutePath();
+  }
+  fileSelectedRun = true;
+}
+
+void loadFile(){
+  fileSelectedRun = false;
+  selectInput("Select a data file", "loadFileSelected", new File(sketchPath("*.art")));
+  while(!fileSelectedRun){
+    delay(500);
+    print(".");
+  }
+  if(loadFileName == null){
+    // do nothing
+    return;
+  }
+  // copy the data into the steps array and prepare to draw
+  byte data[] = loadBytes(loadFileName);
+  short l = 0;
+  l |= data[0];
+  l <<= 8;
+  l |= data[1];
+  stepCount = l;
+  steps = new short[stepCount];
+  pinCount = 0+data[2];
+  
+  for(int i=0; i<l; i++){
+    steps[i] = 0;
+    steps[i] |= data[i+3];
+    if(steps[i] < 0){
+      println("neg step");
+      println(i);
+    }
+  }
+  pic2 = createImage(width-picX, height-picY, RGB);
+  pic2.loadPixels();
+  for(int i=0; i<pic2.pixels.length; i++){
+    pic2.pixels[i] = color(255);
+  }
+  float angle = PI*2.0/pinCount;
+  for(int i=0; i<pinCount; i++){
+    pinsXY[i][0] = round(pic2.height/2 + pic2.height/2 * cos(i*angle));
+    pinsXY[i][1] = round(pic2.height/2 - pic2.height/2 * sin(i*angle));
+  }
+  picScale2 = 1;
+  stepsDone = 1;
+  withPic = 0;
+  
+}
+
+void loadFileSelected(File f){
+  if (f == null) {
+    loadFileName = null;
+  }else{
+    loadFileName = f.getAbsolutePath();
+  }
+  fileSelectedRun = true;
 }
